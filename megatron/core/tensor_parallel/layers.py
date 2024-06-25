@@ -152,7 +152,7 @@ class VocabParallelEmbedding(torch.nn.Module):
     """Embedding parallelized in the vocabulary dimension.
 
     This is mainly adapted from torch.nn.Embedding and all the default
-    values are kept.
+    values are kept.主要的执行embedding的并行操作的代码
 
     Args:
         num_embeddings: vocabulary size.
