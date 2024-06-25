@@ -31,7 +31,7 @@
 6. add操作：使用megatron/core/fusions/fused_bias_dropout.py中的_bias_dropout_add_func执行残差residual连接，作为下一个layer norm的输入，shape为[s,b,h]
 
 
-7. MLP模块：
+7. MLP模块：两层的GELU
 （1）megatron/core/models/gpt/gpt_layer_specs.py中定义的_get_mlp_module_spec函数实现，通过MLPSubmodules注册，实现一个行并行RowParallelLinear、一个列并行ColumnParallelLinear计算
 
 def _get_mlp_module_spec(
@@ -47,7 +47,9 @@ def _get_mlp_module_spec(
             ),
         )
 
-（2）激活显存占用，能降低多层transformer的显存占用，分到多张卡里完成训练。
+（2）第一个MLP进行权重A的列切分后，输出[s,b,4h]（网络模型结构决定，h to 4h）。然后分两张卡[s,b,2h]进行GeLU的激活处理后，输入到第二个MLP线性层实现权重B的行切分，输出[s,b,h](实现了4h to h)，最终两张卡进行all_reduce的聚合操作。
+
+8. 作用：激活显存占用，能降低多层transformer的显存占用，分到多张卡里完成训练。
 
 
 
