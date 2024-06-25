@@ -29,6 +29,24 @@
 6. add操作：使用megatron/core/fusions/fused_bias_dropout.py中的_bias_dropout_add_func执行残差residual连接，作为下一个layer norm的输入，shape为[s,b,h]
 
 
+7. MLP模块：
+（1）megatron/core/models/gpt/gpt_layer_specs.py中定义的_get_mlp_module_spec函数实现，通过MLPSubmodules注册，实现一个行并行RowParallelLinear、一个列并行ColumnParallelLinear计算
+
+def _get_mlp_module_spec(
+    use_te: bool = True, num_experts: int = None, moe_grouped_gemm: bool = False
+) -> ModuleSpec:
+    if num_experts is None:
+        # Dense MLP w/ or w/o TE modules.
+        return ModuleSpec(
+            module=MLP,
+            submodules=MLPSubmodules(
+                linear_fc1=TELayerNormColumnParallelLinear if use_te else ColumnParallelLinear,
+                linear_fc2=TERowParallelLinear if use_te else RowParallelLinear,
+            ),
+        )
+
+（2）激活显存占用，能降低多层transformer的显存占用，分到多张卡里完成训练。
+
 
 
 
