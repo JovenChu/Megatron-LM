@@ -26,7 +26,7 @@
 
 5. dropout：实际在gpt_layer_specs.py中使用的是get_bias_dropout_add融合算子实现，防止过拟合
 
-6. add操作：执行残差residual连接，作为下一个layer norm的输入，shape为[s,b,h]
+6. add操作：使用megatron/core/fusions/fused_bias_dropout.py中的_bias_dropout_add_func执行残差residual连接，作为下一个layer norm的输入，shape为[s,b,h]
 
 
 
