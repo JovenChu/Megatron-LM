@@ -5,7 +5,32 @@
 
 2. Embedding并行
    （1）GPTModel类实例化调用了LanguageModelEmbedding函数，从而构建transformer中的embedding层
-   （2）然后去构建embedding层的三种嵌入：word（词）、position（位置）、segment（句子/序列）
+   （2）然后去构建embedding层的两种嵌入：word（词）、position（位置）
    （3）其中通过self.word_embeddings = tensor_parallel.VocabParallelEmbedding去构建张量的并行策略
      （a）megatron/core/tensor_parallel/layers.py中定义了并行函数VocabParallelEmbedding
-     （b）
+     （b）需要先定义并行维度tp_size = 2(2张卡)、vocal_size=50000(5万的token字典)、embedding_dim=1024(将每个token映射到1024的向量维度)。所以张量的并行就是NPU0负责0-2.5w的token映射，NPU1负责2.5w-5w的映射
+      （c）然后通过一个all_reduce的操作，将两个NPU的输出output_parallel进行聚合，生成完整的input embedding shape[s(sequence len,1024), b(batch size,32), h(hidden size,1024)]
+
+3. layerNorm并行
+   （1）作用：分为post（后置）和pre（前置）。归一化的操作，防止输入的大小差异，造成模型参数学习的不均；
+   （2）在gpt_model.py文件中的TransformerBlock函数类中定义，这里面使用的是poet_layer_norm
+   （3）然后再transformer_block.py文件中，默认使用self.final_layernorm = TENorm()进行各种归一化操作，这里没有开启SP，不用进行并行。其中TENorm是英伟达构建的一个加速库transformer_engine.py中，定义了LayerNorm、RMSNorm等归一化的操作，可以直接调用
+
+4. attention并行（核心核心！！！）
+   （1）在pretrain_gpt.py的代码中，函数类model_provider中定义了调用transformer_layer_spec = get_gpt_layer_local_spec()函数来初始化attention层的操作
+   （2）然后通过调用SelfAttentionSubmodules函数，来实现self attention的计算过程
+   （3）其中最核心的是怎么进行qkv的线性两两计算注意力值，是通过ColumnParallelLinear将输入[s,b,h]转化为[s,b,3h]，主要是为了将输出分割为qkv3个矩阵后，按列切分为[s,b,3h/2]执行self attention计算
+   （4）这里的并行是将定义的16个head切分到n张卡中进行并行的attention计算。其中计算最核心的代码在megatron/core/transformer/dot_product_attention.py的DotProductAttention类的forward函数，计算完之后还能进行多个head的合并、shape的转化等，最终输出的shape为[s,b,hp]
+
+
+
+
+
+
+
+
+
+
+
+
+
