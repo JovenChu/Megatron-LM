@@ -19,8 +19,14 @@
 4. attention并行（核心核心！！！）
    （1）在pretrain_gpt.py的代码中，函数类model_provider中定义了调用transformer_layer_spec = get_gpt_layer_local_spec()函数来初始化attention层的操作
    （2）然后通过调用SelfAttentionSubmodules函数，来实现self attention的计算过程
-   （3）其中最核心的是怎么进行qkv的线性两两计算注意力值，是通过ColumnParallelLinear将输入[s,b,h]转化为[s,b,3h]，主要是为了将输出分割为qkv3个矩阵后，按列切分为[s,b,3h/2]执行self attention计算
+   （3）其中最核心的是怎么进行qkv的线性两两计算注意力值，是通过ColumnParallelLinear(列切分)将输入[s,b,h]转化为[s,b,3h]，主要是为了将输出分割为qkv3个矩阵后，按列切分为[s,b,3h/2]执行self attention计算
    （4）这里的并行是将定义的16个head切分到n张卡中进行并行的attention计算。其中计算最核心的代码在megatron/core/transformer/dot_product_attention.py的DotProductAttention类的forward函数，计算完之后还能进行多个head的合并、shape的转化等，最终输出的shape为[s,b,hp]
+（5）列切分：RowParallelLinear实现，输出shape为[s,b,h]
+
+
+5. dropout：实际在gpt_layer_specs.py中使用的是get_bias_dropout_add融合算子实现，防止过拟合
+
+6. add操作：执行残差residual连接，作为下一个layer norm的输入，shape为[s,b,h]
 
 
 
