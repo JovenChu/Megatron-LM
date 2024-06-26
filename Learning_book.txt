@@ -1,4 +1,54 @@
-张量并行——分布式训练
+一、概念及设置
+1. Megatron的并行
+    （1）主要的代码是pretrain_gpt.py，而并行的启动、配置设置就是在example/gpt3文件夹中进行声明
+    （2）其中启动pretrain_gpt.py核心的是model_provider方法，这里初始化了GPT模型，并引入了上面声明的参数
+    （3）pretrain函数：在megaton/training/training.py中，P152行处，初始化进程组
+    （4）get_model函数：在330行，设置模型，分布式启动N个进程，每个进程中间有GPT的模型部分层，并通过PP、DP、TP、model、embedding等进程组进行分别处理
+    （5）build_train_valid_test_data_iterators函数：在1454行，对数据并行进行数据处理，获取三种数据集，然后使用DistributedDataParallel()方法实现分布式数据并行
+    （6）train_step：进行训练的代码。
+
+2. 并行设置：以下所有的代码都在——megatron/core/parallel_state.py
+    （1）配置初始化：通过initialize_model_parallel()方法函数（298行）进行模型分组，并初始化进程相关的全局变量，包括tensor、pipeline、model、data、embedding等group组合，定义分组的大小。
+    （2）先对模型进行切分（TP+PP）
+       （a）TP是横向将张量的计算（矩阵的行、列切分）分成8个组进行处理，组间同名的子模块可以数据并行，每个组是PP流水线的一个stage
+       （b）pipeline是竖向将模型的层分给4个组处理，分组的策略是每隔n//p个取一个gpu构成一组，组内的GPU进行串行执行模型
+    （3）然后对数据进行切分（DP）data并行部分分为8组，每组2个gpu卡共同对一份数据进行并行处理，一个组在同一个通讯域里面
+        
+        ```json
+        create 8 tensor model-parallel groups, 4 pipeline model-parallel groups
+        and 8 data-parallel groups as:
+        8 data_parallel groups:
+            [g0, g2], [g1, g3], [g4, g6], [g5, g7], [g8, g10], [g9, g11], [g12, g14], [g13, g15]
+        8 tensor model-parallel groups:
+            [g0, g1], [g2, g3], [g4, g5], [g6, g7], [g8, g9], [g10, g11], [g12, g13], [g14, g15]
+        4 pipeline model-parallel groups:
+            [g0, g4, g8, g12], [g1, g5, g9, g13], [g2, g6, g10, g14], [g3, g7, g11, g15]
+        ```
+        
+   （4）所有并行配制及处理进程：group进程组就是通信域
+        
+    （5）TP的分组：在megatron/core/parallel_state.py#L348中的get_tensor_model_parallel_group()函数中进行正向forward的权重切分（521行构建、723行使用），并在15行的reduce函数，进行反向传播的时候对tensor（weight）的all_reduce操作进行汇总。节点内跨机器的通讯，使用组内通讯——tensor_model_parapllel_group即可
+   （6）PP进程分配：跨机器跨节点的通信，使用P2POp点对点的通信方式（573行构建、732行使用，通信是在p2p_communication.py的120行中）
+        
+   （7）DD数据并行进程分配：（在485行构建，740行使用）。分组数d = （总GPU/一个模型需要的资源）=n/（t*p）。并且通常是在megatron/util.py中的average_losses_across_data_parallel_group()函数进行使用
+
+
+二、张量并行——理论
+1. 并行原理：
+   （1）列切分：需要将输入X进行copy，然后根据参数A的切分结果分到不同GPU进行与输入的矩阵乘计算，最终通过all_gather进行拼接聚合得到最终结果；
+   （2）行切分：需要将输入X进行按列的split切分，和参数A一样切n份，然后一起分到不同的GPU进行矩阵乘计算，最终通过all_reduce的相加聚合得到最终结果。
+
+2. 列并行（ColumnParallelLinear）的实现细节，通常用在transformer的LN层标准化结构、add和标准化结构中
+   （1）前向传播：只需要对参数进行列切分，与输入相乘，分为Y1、Y2输入不同的NPU中
+   （2）反向传播：这里的Y变成了梯度G，先通过g层进行切分，然后通过一个all_reduce得到每个GPU的聚合后的完整梯度输出
+
+3. 行并行（RowParallelLinear），最重要的，可以用在attention结构、add和标准化结构
+   (1)前向传播，和列差不多，但是对输入也要有个列切分。其中的g操作通过reduce_from_tensor_model_parallel_region()函数实现
+   (2)反向传播，不同的是f中使用all-gather的操作，通过在megatron中的scatter_to_tensor_model_parallel_region()的函数上实现。
+
+
+
+三、张量并行——分布式训练模型结构代码
 
 1. 模型配置
    （1）首先在根目录的pretrain_gpt.py文件中定义好要训练的步骤，需要将写好的训练配置（这个可以参考这个目录：examples/gpt3/train_gpt3_175b_distributed.sh的配置）
@@ -23,7 +73,10 @@
    （2）然后通过调用SelfAttentionSubmodules函数，来实现self attention的计算过程
    （3）其中最核心的是怎么进行qkv的线性两两计算注意力值，是通过ColumnParallelLinear(列切分)将输入[s,b,h]转化为[s,b,3h]，主要是为了将输出分割为qkv3个矩阵后，按列切分为[s,b,3h/2]执行self attention计算
    （4）这里的并行是将定义的16个head切分到n张卡中进行并行的attention计算。其中计算最核心的代码在megatron/core/transformer/dot_product_attention.py的DotProductAttention类的forward函数，计算完之后还能进行多个head的合并、shape的转化等，最终输出的shape为[s,b,hp]
-（5）列切分：RowParallelLinear实现，输出shape为[s,b,h]
+      （a）重点！！！：每个头上都可以独立计算，最后再将结果concat起来。也就是说，可以把每个头的参数放到一块GPU上。对注意力层A（self-attention），三个参数矩阵Q，K，V，按照“列切割”，每个头放到一块GPU上，做并行计算。对线性层B（Dropout），按照“行切割”。切割的方式和MLP层基本一致，其forward与backward原理也一致
+      （b）在实际应用中，并不一定按照一个head占用一块GPU来切割权重，我们也可以一个多个head占用一块GPU，这依然不会改变单块GPU上独立计算的目的。所以实际设计时，我们尽量保证head总数能被GPU个数整除。
+
+   （5）列切分：RowParallelLinear实现，输出shape为[s,b,h]
 
 
 5. dropout：实际在gpt_layer_specs.py中使用的是get_bias_dropout_add融合算子实现，防止过拟合
@@ -32,7 +85,7 @@
 
 
 7. MLP模块：两层的GELU
-（1）megatron/core/models/gpt/gpt_layer_specs.py中定义的_get_mlp_module_spec函数实现，通过MLPSubmodules注册，实现一个行并行RowParallelLinear、一个列并行ColumnParallelLinear计算
+（1）megatron/core/models/gpt/gpt_layer_specs.py中定义的_get_mlp_module_spec函数实现，通过MLPSubmodules注册两个线性层A、B，实现B的行并行RowParallelLinear、A的列并行ColumnParallelLinear计算，这样尽量保证各GPU上的计算相互独立，减少通讯量。对A来说，需要做一次GELU激活的计算，而GELU函数是非线形的
 
 def _get_mlp_module_spec(
     use_te: bool = True, num_experts: int = None, moe_grouped_gemm: bool = False
